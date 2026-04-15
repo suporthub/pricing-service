@@ -1,0 +1,22 @@
+[Unit]
+Description=LiveFXHub Go Pricing Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/v3/pricing-service
+# Update the memory limits below if needed
+LimitNOFILE=65536
+LimitNPROC=65536
+ExecStart=/v3/pricing-service/pricing-service-bin
+Restart=always
+RestartSec=3
+
+# Environment configurations (or use .env file loaded by godotenv)
+# Environment="DATABASE_URL=postgres://livefxhubv3:Livefxhub@123@10.10.0.1:30432/user_db?sslmode=disable"
+# Environment="REDIS_NODES=185.131.54.146:31010,..."
+# Environment="ZMQ_BIND=tcp://0.0.0.0:5556"
+
+[Install]
+WantedBy=multi-user.target
