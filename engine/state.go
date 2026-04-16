@@ -43,7 +43,7 @@ func LoadConfigurations(cfg *config.Config) error {
 			gs."spreadType", 
 			gs.spread, 
 			gs."spreadPip" 
-		FROM "GroupSymbol" gs 
+		FROM group_symbols gs 
 		JOIN groups g ON gs."groupId" = g.id
 	`
 	rows, err := db.Query(query)

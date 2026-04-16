@@ -1143,6 +1143,7 @@
   </message>
   <message name='MarketDataSnapshotFullRefresh' msgcat='app' msgtype='W'>
    <field name='MDReqID' required='N' />
+   <field name='QuoteID' required='N' />
    <component name='Instrument' required='Y' />
    <group name='NoUnderlyings' required='N'>
     <component name='UnderlyingInstrument' required='N' />

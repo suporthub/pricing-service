@@ -1,11 +1,13 @@
 package market
 
 import (
+	"fmt"
 	"log"
 
 	"github.com/quickfixgo/quickfix"
 	"github.com/quickfixgo/quickfix/enum"
 	"github.com/quickfixgo/quickfix/field"
+	"github.com/quickfixgo/quickfix/tag"
 	"github.com/quickfixgo/quickfix/fix44/marketdatarequest"
 	"github.com/quickfixgo/quickfix/fix44/marketdatasnapshotfullrefresh"
 	"pricing-service/engine"
@@ -14,11 +16,15 @@ import (
 type FIXApplication struct {
 	calculator *engine.Calculator
 	SessionID  quickfix.SessionID
+	username   string
+	password   string
 }
 
-func NewFIXApplication(calc *engine.Calculator) *FIXApplication {
+func NewFIXApplication(calc *engine.Calculator, username string, password string) *FIXApplication {
 	return &FIXApplication{
 		calculator: calc,
+		username:   username,
+		password:   password,
 	}
 }
 
@@ -47,42 +53,28 @@ func (f *FIXApplication) OnLogon(sessionID quickfix.SessionID) {
 		// Indices could be added if needed
 	}
 
-	request := marketdatarequest.New(
-		field.NewMDReqID("REQ1"),
-		field.NewSubscriptionRequestType(enum.SubscriptionRequestType_SNAPSHOT_PLUS_UPDATES),
-		field.NewMarketDepth(0), // top of book only if 1, full if 0. usually 1 is best for top.
-	)
-	
-	// QuickFix uses 0 for full book, 1 for top of book. 
-	// The python script didn't specify exactly, assuming top of book is fine. We will request full depth just in case.
+	for i, sym := range symbols {
+		request := marketdatarequest.New(
+			field.NewMDReqID(fmt.Sprintf("REQ%d", i)),
+			field.NewSubscriptionRequestType(enum.SubscriptionRequestType_SNAPSHOT_PLUS_UPDATES),
+			field.NewMarketDepth(1), // Use 1 for top of book (Python used 1 implicitly vs 0)
+		)
 
-	request.Set(field.NewMDUpdateType(enum.MDUpdateType_FULL_REFRESH))
+		request.Set(field.NewMDUpdateType(enum.MDUpdateType_FULL_REFRESH))
 
-	// Add entry types (Bid and Ask)
-	entryTypes := quickfix.NewRepeatingGroup(
-		field.NewNoMDEntryTypes(2),
-		field.NewMDEntryType(enum.MDEntryType_BID),
-		field.NewMDEntryType(enum.MDEntryType_BID), // field ordering
-	)
-    // quickfixgo way to do this:
-    groupType := marketdatarequest.NewNoMDEntryTypesRepeatingGroup()
-    entryBid := groupType.Add()
-    entryBid.SetMDEntryType(enum.MDEntryType_BID)
-    entryAsk := groupType.Add()
-    entryAsk.SetMDEntryType(enum.MDEntryType_OFFER)
-	request.SetNoMDEntryTypes(groupType)
+		groupType := marketdatarequest.NewNoMDEntryTypesRepeatingGroup()
+		groupType.Add().SetMDEntryType(enum.MDEntryType_BID)
+		groupType.Add().SetMDEntryType(enum.MDEntryType_OFFER)
+		request.SetNoMDEntryTypes(groupType)
 
-	// Add symbols
-	symbolsGroup := marketdatarequest.NewNoRelatedSymRepeatingGroup()
-	for _, sym := range symbols {
-		s := symbolsGroup.Add()
-		s.SetSymbol(sym)
-	}
-	request.SetNoRelatedSym(symbolsGroup)
+		symbolsGroup := marketdatarequest.NewNoRelatedSymRepeatingGroup()
+		symbolsGroup.Add().SetSymbol(sym)
+		request.SetNoRelatedSym(symbolsGroup)
 
-	err := quickfix.SendToTarget(request, sessionID)
-	if err != nil {
-		log.Printf("Error sending Market Data Request: %v\n", err)
+		err := quickfix.SendToTarget(request, sessionID)
+		if err != nil {
+			log.Printf("Error sending Market Data Request for %s: %v\n", sym, err)
+		}
 	}
 }
 
@@ -93,6 +85,15 @@ func (f *FIXApplication) OnLogout(sessionID quickfix.SessionID) {
 
 // ToAdmin implemented as part of quickfix.Application interface
 func (f *FIXApplication) ToAdmin(msg *quickfix.Message, sessionID quickfix.SessionID) {
+	msgType, err := msg.Header.GetString(tag.MsgType)
+	if err == nil && msgType == string(enum.MsgType_LOGON) {
+		if f.username != "" {
+			msg.Body.SetString(tag.Username, f.username)
+		}
+		if f.password != "" {
+			msg.Body.SetString(tag.Password, f.password)
+		}
+	}
 }
 
 // ToApp implemented as part of quickfix.Application interface
@@ -106,8 +107,10 @@ func (f *FIXApplication) FromAdmin(msg *quickfix.Message, sessionID quickfix.Ses
 }
 
 // FromApp receives messages from the FIX server.
+// Handles MarketDataSnapshotFullRefresh (W) and sends MassQuoteAck for tag 117
+// to keep the LP price stream alive (matches Python LP connection logic).
 func (f *FIXApplication) FromApp(msg *quickfix.Message, sessionID quickfix.SessionID) quickfix.MessageRejectError {
-	msgType, err := msg.Header.GetString(field.MsgTypeTag)
+	msgType, err := msg.Header.GetString(tag.MsgType)
 	if err != nil {
 		return nil
 	}
@@ -115,9 +118,30 @@ func (f *FIXApplication) FromApp(msg *quickfix.Message, sessionID quickfix.Sessi
 	// We only care about W (MarketDataSnapshotFullRefresh)
 	if msgType == string(enum.MsgType_MARKET_DATA_SNAPSHOT_FULL_REFRESH) {
 		f.handleMarketData(msg)
+		// If QuoteID (tag 117) is present, respond with MassQuoteAcknowledgement
+		// This is critical: PrimeXM expects an ACK and stops sending prices without it.
+		f.sendMassQuoteAckIfPresent(msg, sessionID)
 	}
 
 	return nil
+}
+
+// sendMassQuoteAckIfPresent checks for QuoteID (tag 117) and responds with
+// a MassQuoteAcknowledgement (35=b), matching the Python LP connection logic.
+func (f *FIXApplication) sendMassQuoteAckIfPresent(msg *quickfix.Message, sessionID quickfix.SessionID) {
+	quoteID, err := msg.Body.GetString(tag.QuoteID)
+	if err != nil {
+		return // No QuoteID present, nothing to ack
+	}
+
+	ack := quickfix.NewMessage()
+	ack.Header.SetString(tag.MsgType, "b") // MassQuoteAcknowledgement
+	ack.Body.SetString(tag.QuoteID, quoteID)
+	ack.Body.SetInt(tag.QuoteStatus, 0) // Accepted
+
+	if sendErr := quickfix.SendToTarget(ack, sessionID); sendErr != nil {
+		log.Printf("Failed to send MassQuoteAck for QuoteID=%s: %v", quoteID, sendErr)
+	}
 }
 
 func (f *FIXApplication) handleMarketData(msg *quickfix.Message) {

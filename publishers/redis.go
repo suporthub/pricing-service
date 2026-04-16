@@ -3,6 +3,7 @@ package publishers
 import (
 	"context"
 	"log"
+	"net"
 	"strings"
 
 	"github.com/vmihailenco/msgpack/v5"
@@ -19,7 +20,7 @@ type RedisPublisher struct {
 // The Lua script for atomic state update and broadcasting
 const luaScript = `
 redis.call('HSET', KEYS[1], 'latest', ARGV[1])
-redis.call('PUBLISH', KEYS[2], ARGV[1])
+redis.call('PUBLISH', ARGV[2], ARGV[1])
 return 1
 `
 
@@ -32,27 +33,34 @@ func NewRedisPublisher(cfg *config.Config) *RedisPublisher {
 		nodes[i] = strings.TrimSpace(node)
 	}
 
-	// Address remap (handling pod_ip:6379 -> external:port)
-	remap := make(map[string]string)
-	if cfg.RedisAddressMap != "" {
-		entries := strings.Split(cfg.RedisAddressMap, ",")
-		for _, entry := range entries {
-			parts := strings.Split(entry, ":")
-			if len(parts) == 3 {
-				// Format: 10.0.0.1:6379:185.1.1.1:31000
-				// But user provided a simpler format maybe? Let's use standard Split
-				// Assuming format "pod_ip:6379->ext_ip:port" or similar. But let's keep it simple: Address mapping logic.
-				// Since we might not need this complexity if we use a direct connection 
-				// or if they provide correct external node addresses in REDIS_NODES,
-				// we just pass it to NewClusterAddressOpt below if needed, but go-redis takes a route mapping.
-			}
-		}
-	}
+	// Build Address Map for pod_ip -> external NodePort
+	remap := buildAddressMap(nodes, cfg.RedisPassword)
 
 	// Simple options - rely on user passing the correct nodes pointing to the cluster
+	// Intercept the dialer to route internal IPs to external NodePorts
 	options := &redis.ClusterOptions{
 		Addrs: nodes,
 		Password: cfg.RedisPassword,
+		Dialer: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			origAddr := addr
+			if newAddr, ok := remap[addr]; ok {
+				addr = newAddr
+			} else {
+				addrIP := strings.Split(addr, ":")[0]
+				for laddr, extNode := range remap {
+					if strings.HasPrefix(laddr, addrIP+":") {
+						addr = extNode
+						break
+					}
+				}
+			}
+			var d net.Dialer
+			conn, err := d.DialContext(ctx, network, addr)
+			if err != nil {
+				log.Printf("Dialer intercepted %s -> %s, but dial failed: %v", origAddr, addr, err)
+			}
+			return conn, err
+		},
 	}
 
 	client := redis.NewClusterClient(options)
@@ -78,8 +86,43 @@ func (r *RedisPublisher) PublishFatPayload(symbol string, keyHset string, keyPub
 	}
 
 	// Fire and forget, run lua script with binary data string (Go treats string/[]byte transparently in redis script args)
-	err = r.script.Run(r.ctx, r.client, []string{keyHset, keyPub}, data).Err()
+	err = r.script.Run(r.ctx, r.client, []string{keyHset}, data, keyPub).Err()
 	if err != nil {
 		log.Printf("Redis Lua execution error for %s: %v", symbol, err)
 	}
+}
+
+func buildAddressMap(nodes []string, password string) map[string]string {
+	remap := make(map[string]string)
+	ctx := context.Background()
+
+	for _, node := range nodes {
+		client := redis.NewClient(&redis.Options{
+			Addr:     node,
+			Password: password,
+		})
+
+		res, err := client.Do(ctx, "CLIENT", "INFO").Result()
+		client.Close()
+		if err != nil {
+			log.Printf("Auto-discover warning: failed to connect to %s: %v", node, err)
+			continue
+		}
+
+		info, ok := res.(string)
+		if !ok {
+			continue // ignore if not string
+		}
+
+		parts := strings.Split(info, " ")
+		for _, part := range parts {
+			if strings.HasPrefix(part, "laddr=") {
+				laddr := strings.TrimPrefix(part, "laddr=")
+				remap[laddr] = node
+				log.Printf("Redis Auto-Map: %s -> %s", laddr, node)
+				break
+			}
+		}
+	}
+	return remap
 }

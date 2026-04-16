@@ -45,7 +45,14 @@ func main() {
 		log.Fatalf("Error reading cfg: %v\n", err)
 	}
 
-	app := market.NewFIXApplication(calc)
+	var username, password string
+	for _, dict := range appSettings.SessionSettings() {
+		username, _ = dict.Setting("Username")
+		password, _ = dict.Setting("Password")
+		break // just grab the first session's credentials
+	}
+
+	app := market.NewFIXApplication(calc, username, password)
 	storeFactory := quickfix.NewMemoryStoreFactory()
 	logFactory := quickfix.NewScreenLogFactory()
 

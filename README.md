@@ -25,7 +25,7 @@ When running securely inside a dedicated environment (e.g. EC2, bare-metal serve
    go mod tidy
    go build -o pricing-service-bin cmd/pricing-service/main.go
    ```
-
+2.1 to run directly - go run ./cmd/pricing-service
 3. **Configure Settings**:
    Edit or create `/v3/pricing-service/.env`:
    ```ini
