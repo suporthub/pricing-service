@@ -52,3 +52,19 @@ When deployed inside K3s, the CI/CD pipeline builds the Docker image and publish
 1. The service uses internal K8s DNS to talk to Redis and PostgreSQL.
 2. The GitHub action located at `.github/workflows/ci.yml` handles automatic compilation via `docker build` using the provided Dockerfile.
 3. K3s manifests are in `/v3/k8s/pricing-service-deployment.yaml`.
+
+
+
+
+
+# Rebuild
+go build -o pricing-service-bin ./cmd/pricing-service
+
+# Copy binary + config + env to /opt
+sudo cp pricing-service-bin /opt/pricing-service/
+sudo cp -r config/ /opt/pricing-service/config/
+sudo cp .env /opt/pricing-service/.env
+
+# Restart
+sudo systemctl restart pricing-service
+sudo journalctl -u pricing-service -f

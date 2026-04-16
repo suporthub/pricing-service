@@ -39,37 +39,46 @@ func (c *Calculator) processTick(tick RawTick) {
 
 	// 2. Redis Fat Payload (The new architecture)
 	groupSpreads, exists := ConfigState[tick.Symbol]
-	if !exists {
-		// If symbol is not configured, we just don't publish the fat payload.
-		// Alternatively, we could publish a raw unconfigured payload, but safety first.
-		return
-	}
-
+	
 	fatPayload := make(map[string][]float64)
+	
+	// Always store the raw, unmodified Bid/Ask
+	fatPayload["Raw"] = []float64{tick.Bid, tick.Ask}
 
-	mid := (tick.Ask + tick.Bid) / 2.0
+	// If symbol has spread configurations in the DB, calculate and add them
+	if exists {
+		mid := (tick.Ask + tick.Bid) / 2.0
 
-	for groupName, config := range groupSpreads {
-		halfSpread := (config.Spread * config.SpreadPip) / 2.0
+		for groupName, config := range groupSpreads {
+			halfSpread := (config.Spread * config.SpreadPip) / 2.0
 
-		var newBid, newAsk float64
+			var newBid, newAsk float64
 
-		if config.SpreadType == "fixed" {
-			newAsk = mid + halfSpread
-			newBid = mid - halfSpread
-		} else { // "variable" or default
-			newAsk = tick.Ask + halfSpread
-			newBid = tick.Bid - halfSpread
+			if config.SpreadType == "fixed" {
+				newAsk = mid + halfSpread
+				newBid = mid - halfSpread
+			} else { // "variable" or default
+				newAsk = tick.Ask + halfSpread
+				newBid = tick.Bid - halfSpread
+			}
+
+			// Ensure bid is never greater than ask due to huge negative spreads
+			if newBid >= newAsk {
+				newBid = newAsk - (config.SpreadPip * 0.1) // minimal safety gap
+			}
+
+			fatPayload[groupName] = []float64{newBid, newAsk}
 		}
-
-		// Ensure bid is never greater than ask due to huge negative spreads
-		if newBid >= newAsk {
-			newBid = newAsk - (config.SpreadPip * 0.1) // minimal safety gap
-		}
-
-		fatPayload[groupName] = []float64{newBid, newAsk}
 	}
 
-	keys := RedisKeys[tick.Symbol]
+	keys, keyExists := RedisKeys[tick.Symbol]
+	if !keyExists {
+		// Generate keys dynamically if the symbol wasn't in the DB config
+		keys = SymbolKeys{
+			HSet: "current_price:" + tick.Symbol,
+			Pub:  "tick:" + tick.Symbol,
+		}
+	}
+
 	c.redisPub.PublishFatPayload(tick.Symbol, keys.HSet, keys.Pub, fatPayload)
 }

@@ -3,6 +3,7 @@ package publishers
 import (
 	"encoding/json"
 	"log"
+	"strconv"
 	"sync"
 
 	zmq "github.com/pebbe/zmq4"
@@ -54,9 +55,9 @@ func (z *ZMQPublisher) Publish(symbol string, ask float64, bid float64) {
 	topicAsk := "datafeeds/" + symbol + "/b"
 	topicBid := "datafeeds/" + symbol + "/o"
 
-	payload := map[string]float64{
-		topicAsk: ask,
-		topicBid: bid,
+	payload := map[string]string{
+		topicAsk: strconv.FormatFloat(ask, 'f', -1, 64),
+		topicBid: strconv.FormatFloat(bid, 'f', -1, 64),
 	}
 
 	data, err := json.Marshal(payload)
