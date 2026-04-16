@@ -21,7 +21,7 @@ func LoadConfig() *Config {
 
 	return &Config{
 		DatabaseURL:       getEnv("DATABASE_URL", "postgres://livefxhubv3:Livefxhub%40123@10.10.0.1:30432/user_db?sslmode=disable"),
-		RedisNodes:        getEnv("REDIS_NODES", "185.131.54.146:31010,185.131.54.146:31011,185.131.54.146:31003,185.131.54.146:31009,185.131.54.146:31007,185.131.54.146:31008"),
+		RedisNodes:        getEnv("REDIS_NODES", "185.131.54.146:31010,185.131.54.146:31011,185.131.54.146:31003"),
 		RedisPassword:     getEnv("REDIS_PASSWORD", ""),
 		RedisExternalHost: getEnv("REDIS_EXTERNAL_HOST", "185.131.54.146"),
 		RedisAddressMap:   getEnv("REDIS_ADDRESS_MAP", ""), // e.g. "10.0.0.5:31001"

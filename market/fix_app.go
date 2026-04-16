@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 
 	"github.com/quickfixgo/quickfix"
 	"pricing-service/engine"
@@ -55,15 +56,41 @@ func (f *FIXApplication) OnLogon(sessionID quickfix.SessionID) {
 
 	// Subscribe to predefined instruments
 	symbols := []string{
-		"AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "AUDSGD", "AUDUSD",
-		"BTCUSD", "CADCHF", "CADJPY", "CHFJPY", "CHFSGD", "EURAUD",
-		"EURCAD", "EURCHF", "EURCZK", "EURGBP", "EURJPY", "EURNOK",
-		"EURNZD", "EURPLN", "EURSEK", "EURSGD", "EURTRY", "EURUSD",
-		"GBPAUD", "GBPCAD", "GBPCHF", "GBPJPY", "GBPNZD", "GBPSGD",
-		"GBPUSD", "NZDCAD", "NZDCHF", "NZDJPY", "NZDUSD", "USDCAD",
-		"USDCHF", "USDCNH", "USDCZK", "USDDKK", "USDHKD", "USDHUF",
-		"USDJPY", "USDMXN", "USDNOK", "USDPLN", "USDSEK", "USDSGD",
-		"USDTRY", "USDZAR", "XAGUSD", "XAUUSD", "UKOIL", "USOIL",
+		"AUDCAD",
+            "AUDCHF","AUDJPY","AUDNZD","AUDSGD","AUDUSD",
+            "BTCUSD","CADCHF","CADJPY","CHFJPY","CHFSGD",
+            "EURAUD","EURCAD","EURCHF","EURCZK","EURGBP",
+            "EURJPY","EURNOK","EURNZD","EURPLN","EURSEK",
+            "EURSGD","EURTRY","EURUSD","EURZAR","GBPAUD",
+            "GPBCAD","GPBCHF","GPBJPY","GBPNOK","GBPNZD",
+            "GBPSEK","GBPUSD","NGAS","NOKSEK","NZDCAD",
+            "NZDJPY","NZDUSD","SEKJPY","SGDJPY","US30",
+            "USDCAD","USDCHF","USDCNH","USDCZK","USDJPY",
+            "USDNOK","USDSEK","USDSGD","USDTHB","USDTRY",
+            "USDZAR","XAGUSD","XAUUSD","ZARJPY","AUDCNH",
+            "CNHJPY","EURCNH","GBPCNH","NZDCHF","NZDCNH",
+            "AUDHKD","CADHKD","CHFHKD","EURDKK","EURHKD",
+            "EURHUF","EURMXN","GBPHKD","GBPMXN","GBPSGD",
+            "GBPTRY","HKDJPY","MXNJPY","NOKJPY","NZDHKD",
+            "NZDSGD","SGDHKD","TRYJPY","USDDKK","USDHKD",
+            "USDHUF","USDMXN","USDPLN","GAUCNH","GAUUSD",
+            "XAGAUD","XAGEUR","XAUCNH","XAUEUR","XAUGBP",
+            "XAUJPY","XAUAUD","XPDUSD","XPTUSD","UKOUSD",
+            "USOUSD","COCOA","COFFEE_ARABICA","COFFEE_ROBUSTA",
+            "COTTON","GASOIL","GASOLINE","ORANGE-JUICE",
+            "SOYBEAN","SUGAR-RAW","WHEAT","GER40","NAS100",
+            "SPX500","UK100","AUS200","ESP35","EU50",
+            "FRA40","HK50","JPN225","US Small Cap 2000",
+            "ADAUSD","ALGUSD","ATMUSD","AVAUSD","AXSUSD",
+            "BATUSD","BNBUSD","BTCEUR","CHRUSD","COMUSD",
+            "CRVUSD","DOGUSD","DOTUSD","DSHUSD","ENJUSD",
+            "EOSUSD","GRTUSD","INCUSD","KNCUSD","LNKUSD",
+            "LRCUSD","MANUSD","MKRUSD","NERUSD","OMGUSD",
+            "SKLUSD","SNDUSD","SNXUSD","SOLUSD","SXPUSD",
+            "TRXUSD","UNIUSD","XBNUSD","XETEUR","XETUSD",
+            "XLCUSD","XLMUSD","XMRUSD","XRPUSD","XSIUSD",
+            "XTZUSD","AVXUSD","XAU02","XAU04","XAU06",
+            "XAU10","XAU12"
 	}
 
 	for i, sym := range symbols {
@@ -162,51 +189,48 @@ func (f *FIXApplication) sendMassQuoteAckIfPresent(msg *quickfix.Message, sessio
 }
 
 func (f *FIXApplication) handleMarketData(msg *quickfix.Message) {
-	symbol, err := msg.Body.GetString(tagSymbol)
-	if err != nil {
-		return
-	}
+	// Parse the raw FIX message string directly — exactly like Python's fromApp.
+	// This avoids quickfixgo's repeating group API which fails silently when the
+	// GroupTemplate doesn't include all tags PrimeXM sends (e.g. 271 MDEntrySize).
+	raw := msg.String()
 
-	// Get the NoMDEntries repeating group
-	group := quickfix.NewRepeatingGroup(tagNoMDEntries,
-		quickfix.GroupTemplate{
-			quickfix.GroupElement(tagMDEntryType),
-			quickfix.GroupElement(tagMDEntryPx),
-		})
-	err2 := msg.Body.GetGroup(group)
-	if err2 != nil {
-		return
-	}
-
+	var sym string
 	var bid, ask float64
+	var currentEntryType string // "0" = bid, "1" = offer
 
-	for i := 0; i < group.Len(); i++ {
-		entry := group.Get(i)
-
-		entryType, err := entry.GetString(tagMDEntryType)
-		if err != nil {
+	// Split by SOH (FIX delimiter 0x01)
+	for _, field := range strings.Split(raw, "\x01") {
+		if field == "" || !strings.Contains(field, "=") {
 			continue
 		}
+		parts := strings.SplitN(field, "=", 2)
+		tag := parts[0]
+		val := parts[1]
 
-		priceStr, err := entry.GetString(tagMDEntryPx)
-		if err != nil {
-			continue
-		}
-		priceF, parseErr := strconv.ParseFloat(priceStr, 64)
-		if parseErr != nil {
-			continue
-		}
-
-		if entryType == "0" { // Bid
-			bid = priceF
-		} else if entryType == "1" { // Offer
-			ask = priceF
+		switch tag {
+		case "55": // Symbol
+			sym = val
+		case "269": // MDEntryType (0=Bid, 1=Offer)
+			currentEntryType = val
+		case "270": // MDEntryPx
+			if sym == "" {
+				continue
+			}
+			price, err := strconv.ParseFloat(val, 64)
+			if err != nil {
+				continue
+			}
+			if currentEntryType == "0" {
+				bid = price
+			} else if currentEntryType == "1" {
+				ask = price
+			}
 		}
 	}
 
-	if bid > 0 && ask > 0 {
+	if bid > 0 && ask > 0 && sym != "" {
 		tick := engine.RawTick{
-			Symbol: symbol,
+			Symbol: sym,
 			Bid:    bid,
 			Ask:    ask,
 		}

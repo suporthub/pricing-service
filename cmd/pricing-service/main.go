@@ -12,6 +12,7 @@ import (
 	"pricing-service/publishers"
 
 	"github.com/quickfixgo/quickfix"
+	"github.com/quickfixgo/quickfix/log/screen"
 )
 
 func main() {
@@ -54,7 +55,7 @@ func main() {
 
 	app := market.NewFIXApplication(calc, username, password)
 	storeFactory := quickfix.NewMemoryStoreFactory()
-	logFactory := quickfix.NewScreenLogFactory()
+	logFactory := screen.NewLogFactory()
 
 	initiator, err := quickfix.NewInitiator(app, storeFactory, appSettings, logFactory)
 	if err != nil {

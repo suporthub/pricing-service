@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
-	"time"
 
 	zmq "github.com/pebbe/zmq4"
 )
@@ -49,8 +48,9 @@ func (z *ZMQPublisher) connect() {
 }
 
 func (z *ZMQPublisher) Publish(symbol string, ask float64, bid float64) {
-	// Replicating Python structure:
-	// {"datafeeds/SYMBOL/o": bid, "datafeeds/SYMBOL/b": ask}
+	// Replicating Python structure exactly:
+	// zmq_publisher.send_json({"datafeeds/SYMBOL/o": bid, "datafeeds/SYMBOL/b": ask})
+	// Python send_json = single frame JSON string
 	topicAsk := "datafeeds/" + symbol + "/b"
 	topicBid := "datafeeds/" + symbol + "/o"
 
@@ -67,14 +67,11 @@ func (z *ZMQPublisher) Publish(symbol string, ask float64, bid float64) {
 	z.mu.Lock()
 	defer z.mu.Unlock()
 
-	_, err = z.socket.SendMessageDontwait(string(data))
+	// Use Send (single frame) to match Python's send_json format.
+	// Python subscribers use recv_json() which expects a single frame.
+	_, err = z.socket.Send(string(data), zmq.DONTWAIT)
 	if err != nil {
-		// Log and swallow non-blocking error, or try blocking
-		go func(msg string) {
-			time.Sleep(100 * time.Millisecond)
-			z.mu.Lock()
-			_, _ = z.socket.SendMessage(msg)
-			z.mu.Unlock()
-		}(string(data))
+		// Retry once with blocking send
+		_, _ = z.socket.Send(string(data), 0)
 	}
 }
