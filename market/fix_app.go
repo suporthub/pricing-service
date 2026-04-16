@@ -3,14 +3,29 @@ package market
 import (
 	"fmt"
 	"log"
+	"strconv"
 
 	"github.com/quickfixgo/quickfix"
-	"github.com/quickfixgo/quickfix/enum"
-	"github.com/quickfixgo/quickfix/field"
-	"github.com/quickfixgo/quickfix/tag"
-	"github.com/quickfixgo/quickfix/fix44/marketdatarequest"
-	"github.com/quickfixgo/quickfix/fix44/marketdatasnapshotfullrefresh"
 	"pricing-service/engine"
+)
+
+// FIX Tag constants (raw integers, compatible with quickfixgo v0.9.x flat API)
+const (
+	tagMsgType                = quickfix.Tag(35)
+	tagSymbol                 = quickfix.Tag(55)
+	tagMDReqID                = quickfix.Tag(262)
+	tagSubscriptionRequestType = quickfix.Tag(263)
+	tagMarketDepth            = quickfix.Tag(264)
+	tagMDUpdateType           = quickfix.Tag(265)
+	tagNoMDEntryTypes         = quickfix.Tag(267)
+	tagNoRelatedSym           = quickfix.Tag(146)
+	tagMDEntryType            = quickfix.Tag(269)
+	tagMDEntryPx              = quickfix.Tag(270)
+	tagNoMDEntries            = quickfix.Tag(268)
+	tagUsername                = quickfix.Tag(553)
+	tagPassword               = quickfix.Tag(554)
+	tagQuoteID                = quickfix.Tag(117)
+	tagQuoteStatus            = quickfix.Tag(297)
 )
 
 type FIXApplication struct {
@@ -39,7 +54,6 @@ func (f *FIXApplication) OnLogon(sessionID quickfix.SessionID) {
 	log.Printf("FIX Session logged on: %s\n", sessionID.String())
 
 	// Subscribe to predefined instruments
-	// In production, you might fetch this list from the database.
 	symbols := []string{
 		"AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "AUDSGD", "AUDUSD",
 		"BTCUSD", "CADCHF", "CADJPY", "CHFJPY", "CHFSGD", "EURAUD",
@@ -50,28 +64,31 @@ func (f *FIXApplication) OnLogon(sessionID quickfix.SessionID) {
 		"USDCHF", "USDCNH", "USDCZK", "USDDKK", "USDHKD", "USDHUF",
 		"USDJPY", "USDMXN", "USDNOK", "USDPLN", "USDSEK", "USDSGD",
 		"USDTRY", "USDZAR", "XAGUSD", "XAUUSD", "UKOIL", "USOIL",
-		// Indices could be added if needed
 	}
 
 	for i, sym := range symbols {
-		request := marketdatarequest.New(
-			field.NewMDReqID(fmt.Sprintf("REQ%d", i)),
-			field.NewSubscriptionRequestType(enum.SubscriptionRequestType_SNAPSHOT_PLUS_UPDATES),
-			field.NewMarketDepth(1), // Use 1 for top of book (Python used 1 implicitly vs 0)
-		)
+		msg := quickfix.NewMessage()
+		msg.Header.SetField(tagMsgType, quickfix.FIXString("V")) // MarketDataRequest
 
-		request.Set(field.NewMDUpdateType(enum.MDUpdateType_FULL_REFRESH))
+		msg.Body.SetField(tagMDReqID, quickfix.FIXString(fmt.Sprintf("REQ%d", i)))
+		msg.Body.SetField(tagSubscriptionRequestType, quickfix.FIXString("1")) // Snapshot + Updates
+		msg.Body.SetField(tagMarketDepth, quickfix.FIXInt(1))                  // Top of book
+		msg.Body.SetField(tagMDUpdateType, quickfix.FIXInt(0))                 // Full Refresh
 
-		groupType := marketdatarequest.NewNoMDEntryTypesRepeatingGroup()
-		groupType.Add().SetMDEntryType(enum.MDEntryType_BID)
-		groupType.Add().SetMDEntryType(enum.MDEntryType_OFFER)
-		request.SetNoMDEntryTypes(groupType)
+		// NoMDEntryTypes group (Bid + Offer)
+		entryTypesGroup := quickfix.NewRepeatingGroup(tagNoMDEntryTypes,
+			quickfix.GroupTemplate{quickfix.GroupElement(tagMDEntryType)})
+		entryTypesGroup.Add().SetField(tagMDEntryType, quickfix.FIXString("0")) // Bid
+		entryTypesGroup.Add().SetField(tagMDEntryType, quickfix.FIXString("1")) // Offer
+		msg.Body.SetGroup(entryTypesGroup)
 
-		symbolsGroup := marketdatarequest.NewNoRelatedSymRepeatingGroup()
-		symbolsGroup.Add().SetSymbol(sym)
-		request.SetNoRelatedSym(symbolsGroup)
+		// NoRelatedSym group (the symbol)
+		symbolGroup := quickfix.NewRepeatingGroup(tagNoRelatedSym,
+			quickfix.GroupTemplate{quickfix.GroupElement(tagSymbol)})
+		symbolGroup.Add().SetField(tagSymbol, quickfix.FIXString(sym))
+		msg.Body.SetGroup(symbolGroup)
 
-		err := quickfix.SendToTarget(request, sessionID)
+		err := quickfix.SendToTarget(msg, sessionID)
 		if err != nil {
 			log.Printf("Error sending Market Data Request for %s: %v\n", sym, err)
 		}
@@ -83,15 +100,15 @@ func (f *FIXApplication) OnLogout(sessionID quickfix.SessionID) {
 	log.Printf("FIX Session logged out: %s\n", sessionID.String())
 }
 
-// ToAdmin implemented as part of quickfix.Application interface
+// ToAdmin injects credentials into Logon messages
 func (f *FIXApplication) ToAdmin(msg *quickfix.Message, sessionID quickfix.SessionID) {
-	msgType, err := msg.Header.GetString(tag.MsgType)
-	if err == nil && msgType == string(enum.MsgType_LOGON) {
+	msgType, err := msg.Header.GetString(tagMsgType)
+	if err == nil && msgType == "A" { // MsgType_LOGON
 		if f.username != "" {
-			msg.Body.SetString(tag.Username, f.username)
+			msg.Body.SetField(tagUsername, quickfix.FIXString(f.username))
 		}
 		if f.password != "" {
-			msg.Body.SetString(tag.Password, f.password)
+			msg.Body.SetField(tagPassword, quickfix.FIXString(f.password))
 		}
 	}
 }
@@ -110,13 +127,13 @@ func (f *FIXApplication) FromAdmin(msg *quickfix.Message, sessionID quickfix.Ses
 // Handles MarketDataSnapshotFullRefresh (W) and sends MassQuoteAck for tag 117
 // to keep the LP price stream alive (matches Python LP connection logic).
 func (f *FIXApplication) FromApp(msg *quickfix.Message, sessionID quickfix.SessionID) quickfix.MessageRejectError {
-	msgType, err := msg.Header.GetString(tag.MsgType)
+	msgType, err := msg.Header.GetString(tagMsgType)
 	if err != nil {
 		return nil
 	}
 
 	// We only care about W (MarketDataSnapshotFullRefresh)
-	if msgType == string(enum.MsgType_MARKET_DATA_SNAPSHOT_FULL_REFRESH) {
+	if msgType == "W" {
 		f.handleMarketData(msg)
 		// If QuoteID (tag 117) is present, respond with MassQuoteAcknowledgement
 		// This is critical: PrimeXM expects an ACK and stops sending prices without it.
@@ -129,15 +146,15 @@ func (f *FIXApplication) FromApp(msg *quickfix.Message, sessionID quickfix.Sessi
 // sendMassQuoteAckIfPresent checks for QuoteID (tag 117) and responds with
 // a MassQuoteAcknowledgement (35=b), matching the Python LP connection logic.
 func (f *FIXApplication) sendMassQuoteAckIfPresent(msg *quickfix.Message, sessionID quickfix.SessionID) {
-	quoteID, err := msg.Body.GetString(tag.QuoteID)
+	quoteID, err := msg.Body.GetString(tagQuoteID)
 	if err != nil {
 		return // No QuoteID present, nothing to ack
 	}
 
 	ack := quickfix.NewMessage()
-	ack.Header.SetString(tag.MsgType, "b") // MassQuoteAcknowledgement
-	ack.Body.SetString(tag.QuoteID, quoteID)
-	ack.Body.SetInt(tag.QuoteStatus, 0) // Accepted
+	ack.Header.SetField(tagMsgType, quickfix.FIXString("b")) // MassQuoteAcknowledgement
+	ack.Body.SetField(tagQuoteID, quickfix.FIXString(quoteID))
+	ack.Body.SetField(tagQuoteStatus, quickfix.FIXInt(0)) // Accepted
 
 	if sendErr := quickfix.SendToTarget(ack, sessionID); sendErr != nil {
 		log.Printf("Failed to send MassQuoteAck for QuoteID=%s: %v", quoteID, sendErr)
@@ -145,49 +162,55 @@ func (f *FIXApplication) sendMassQuoteAckIfPresent(msg *quickfix.Message, sessio
 }
 
 func (f *FIXApplication) handleMarketData(msg *quickfix.Message) {
-	refresh := marketdatasnapshotfullrefresh.FromMessage(msg)
-	
-	symbol, err := refresh.GetSymbol()
+	symbol, err := msg.Body.GetString(tagSymbol)
 	if err != nil {
 		return
 	}
 
-	entries, err := refresh.GetNoMDEntries()
-	if err != nil {
+	// Get the NoMDEntries repeating group
+	group := quickfix.NewRepeatingGroup(tagNoMDEntries,
+		quickfix.GroupTemplate{
+			quickfix.GroupElement(tagMDEntryType),
+			quickfix.GroupElement(tagMDEntryPx),
+		})
+	err2 := msg.Body.GetGroup(group)
+	if err2 != nil {
 		return
 	}
 
 	var bid, ask float64
 
-	for i := 0; i < entries.Len(); i++ {
-		entry := entries.Get(i)
-		
-		entryType, err := entry.GetMDEntryType()
+	for i := 0; i < group.Len(); i++ {
+		entry := group.Get(i)
+
+		entryType, err := entry.GetString(tagMDEntryType)
 		if err != nil {
 			continue
 		}
 
-		price, err := entry.GetMDEntryPx()
+		priceStr, err := entry.GetString(tagMDEntryPx)
 		if err != nil {
 			continue
 		}
-        priceF, _ := price.Float64()
+		priceF, parseErr := strconv.ParseFloat(priceStr, 64)
+		if parseErr != nil {
+			continue
+		}
 
-		if entryType == enum.MDEntryType_BID {
+		if entryType == "0" { // Bid
 			bid = priceF
-		} else if entryType == enum.MDEntryType_OFFER {
+		} else if entryType == "1" { // Offer
 			ask = priceF
 		}
 	}
 
 	if bid > 0 && ask > 0 {
-		// Drop tick into isolated memory channel immediately (nanoseconds)
 		tick := engine.RawTick{
 			Symbol: symbol,
 			Bid:    bid,
 			Ask:    ask,
 		}
-		
+
 		select {
 		case f.calculator.TickPipe <- tick:
 		default:
