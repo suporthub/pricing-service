@@ -90,7 +90,7 @@ func (f *FIXApplication) OnLogon(sessionID quickfix.SessionID) {
             "TRXUSD","UNIUSD","XBNUSD","XETEUR","XETUSD",
             "XLCUSD","XLMUSD","XMRUSD","XRPUSD","XSIUSD",
             "XTZUSD","AVXUSD","XAU02","XAU04","XAU06",
-            "XAU10","XAU12"
+            "XAU10","XAU12",
 	}
 
 	for i, sym := range symbols {
