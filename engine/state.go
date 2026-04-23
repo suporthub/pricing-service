@@ -24,6 +24,16 @@ type SymbolKeys struct {
 }
 var RedisKeys = map[string]SymbolKeys{}
 
+type DailyStats struct {
+	Open float64
+	High float64
+	Low  float64
+	Date string // YYYY-MM-DD
+}
+
+// StatsState maps Symbol -> GroupName -> DailyStats
+var StatsState = map[string]map[string]*DailyStats{}
+
 func LoadConfigurations(cfg *config.Config) error {
 	log.Println("Connecting to PostgreSQL to load spread configurations...")
 	db, err := sql.Open("postgres", cfg.DatabaseURL)
