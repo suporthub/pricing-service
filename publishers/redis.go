@@ -39,10 +39,14 @@ return 1
 `
 
 // luaGroupScript writes one HSET field per group ("BID,ASK" string) and
-// publishes the raw tick ("BID,ASK") to the tick channel consumed by the Go services.
+// publishes the full multi-group tick string to the tick channel consumed by Go services.
+//
+// Payload format on tick:<SYMBOL>:
+//   "Raw:1.10010,1.10020|Standard:1.09980,1.10050|VIP:1.09995,1.10035"
+//
 // KEYS[1] = HSET key (e.g. "current_price:EURUSD")
 // ARGV[1] = tick pub channel (e.g. "tick:EURUSD")
-// ARGV[2] = raw "BID,ASK" string for the tick channel (uses "Raw" group prices)
+// ARGV[2] = pre-built multi-group string (constructed in Go)
 // ARGV[3..N] = alternating field/value pairs: groupName, "BID,ASK", groupName, "BID,ASK", ...
 const luaGroupScript = `
 local tick_channel = ARGV[1]
@@ -55,7 +59,7 @@ while i <= #ARGV do
     i = i + 2
 end
 
--- Publish the raw "BID,ASK" to the tick channel for risk-service
+-- Publish the multi-group string to the tick channel for risk-service
 redis.call('PUBLISH', tick_channel, tick_payload)
 return 1
 `
@@ -116,32 +120,52 @@ func NewRedisPublisher(cfg *config.Config) *RedisPublisher {
 }
 
 // PublishGroupPrices writes per-group fast-string prices into the Redis Hash and
-// publishes a raw "BID,ASK" tick to the tick channel.
+// publishes a multi-group tick string to the tick channel.
 //
-// This is the format consumed by:
+// Tick payload format (tick:<SYMBOL>):
+//   "Raw:1.10010,1.10020|Standard:1.09980,1.10050|VIP:1.09995,1.10035"
+//
+// This allows the risk-service to parse group-specific bid/ask in ~80ns using
+// two string splits — eliminating any need to re-apply spread logic downstream.
+//
+// Consumers:
 //   - execution-service: HGET current_price:<SYMBOL> <GROUP_NAME> → "BID,ASK"
-//   - risk-service:      SUBSCRIBE tick:<SYMBOL>                  → "BID,ASK"
+//   - risk-service:      SUBSCRIBE tick:<SYMBOL>  → multi-group string (split by "|" then ":")
 //
-// groupPrices: map of GroupName → [bid, ask]
-// rawBid, rawAsk: the unspread market price used for the tick channel publish
+// groupPrices: map of GroupName → [bid, ask, high, low, pctChange]
 func (r *RedisPublisher) PublishGroupPrices(
 	symbol string,
 	keyHset string,
 	tickChannel string,
-	rawBid float64,
-	rawAsk float64,
 	groupPrices map[string][]float64,
 ) {
-	// Build ARGV: [tickChannel, "rawBid,rawAsk", group1, "bid,ask", group2, "bid,ask", ...]
-	rawTick := fmt.Sprintf("%.5f,%.5f", rawBid, rawAsk)
-	argv := []interface{}{tickChannel, rawTick}
+	// Build the multi-group tick string: "Raw:B,A|Group1:B,A|Group2:B,A"
+	// and ARGV pairs for the HSET fields simultaneously in one pass.
+	var tickBuf strings.Builder
+	argv := []interface{}{tickChannel, ""} // ARGV[2] will be filled after the loop
 
+	first := true
 	for groupName, prices := range groupPrices {
-		if len(prices) != 2 {
+		if len(prices) < 2 {
 			continue
 		}
-		argv = append(argv, groupName, fmt.Sprintf("%.5f,%.5f", prices[0], prices[1]))
+		pairStr := fmt.Sprintf("%.5f,%.5f", prices[0], prices[1])
+
+		// Append to multi-group tick string
+		if !first {
+			tickBuf.WriteByte('|')
+		}
+		tickBuf.WriteString(groupName)
+		tickBuf.WriteByte(':')
+		tickBuf.WriteString(pairStr)
+		first = false
+
+		// HSET field/value pair
+		argv = append(argv, groupName, pairStr)
 	}
+
+	// Slot the completed tick string into ARGV[2]
+	argv[1] = tickBuf.String()
 
 	err := r.groupScript.Run(r.ctx, r.client, []string{keyHset}, argv...).Err()
 	if err != nil {

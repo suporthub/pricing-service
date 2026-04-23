@@ -86,15 +86,15 @@ func (c *Calculator) processTick(tick RawTick) {
 	}
 
 	// 3. Publish per-group fast-string prices to Redis Hash + tick channel.
-	//    This is the format consumed by execution-service (HGET) and risk-service (SUBSCRIBE).
-	//    Format: HSET current_price:<SYMBOL> <GROUP> "BID,ASK"
-	//            PUBLISH tick:<SYMBOL> "BID,ASK"
+	//    Format in HSET: current_price:<SYMBOL>  field=<GROUP>  value="BID,ASK"
+	//    Format on tick:<SYMBOL> pub/sub:
+	//      "Raw:1.10010,1.10020|Standard:1.09980,1.10050|VIP:1.09995,1.10035"
+	//    The risk-service splits this string by "|" then ":" to get per-group prices
+	//    with zero spread re-calculation.
 	c.redisPub.PublishGroupPrices(
 		tick.Symbol,
 		keys.HSet,
 		keys.Pub, // "tick:<SYMBOL>"
-		rawBid,
-		rawAsk,
 		fatPayload,
 	)
 
