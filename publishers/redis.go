@@ -7,6 +7,9 @@ import (
 	"net"
 	"strings"
 
+	"fmt"
+	"time"
+
 	"github.com/vmihailenco/msgpack/v5"
 	"github.com/redis/go-redis/v9"
 	"pricing-service/config"
@@ -165,6 +168,31 @@ func (r *RedisPublisher) PublishFatPayload(symbol string, keyHset string, fatCha
 	if err != nil {
 		log.Printf("Redis fat payload Lua error for %s: %v", symbol, err)
 	}
+}
+
+func (r *RedisPublisher) SaveStats(symbol string, group string, open, high, low float64, date string) {
+	key := "price_stats:" + symbol
+	r.client.HSet(r.ctx, key, map[string]interface{}{
+		group + ":open": fmt.Sprintf("%f", open),
+		group + ":high": fmt.Sprintf("%f", high),
+		group + ":low":  fmt.Sprintf("%f", low),
+		group + ":date": date,
+	})
+	// Set TTL to 48h to clean up old symbols
+	r.client.Expire(r.ctx, key, 48*time.Hour)
+}
+
+func (r *RedisPublisher) LoadAllStats() (map[string]map[string]interface{}, error) {
+	// Find all keys matching price_stats:*
+	// Note: In a cluster, we might need to iterate nodes, but for now we'll try a simpler approach
+	// since topic creation/config loading is centralized.
+	
+	// Better: just let the calculator load stats lazily or on startup for known symbols.
+	return nil, nil // placeholder, will implement lazy loading in calculator
+}
+
+func (r *RedisPublisher) LoadStatsForSymbol(symbol string) (map[string]string, error) {
+	return r.client.HGetAll(r.ctx, "price_stats:"+symbol).Result()
 }
 
 func buildAddressMap(nodes []string, password string) map[string]string {
