@@ -85,8 +85,26 @@ func (c *Calculator) processTick(tick RawTick) {
 		}
 	}
 
-	c.redisPub.PublishFatPayload(tick.Symbol, keys.HSet, keys.Pub, fatPayload)
+	// 3. Publish per-group fast-string prices to Redis Hash + tick channel.
+	//    This is the format consumed by execution-service (HGET) and risk-service (SUBSCRIBE).
+	//    Format: HSET current_price:<SYMBOL> <GROUP> "BID,ASK"
+	//            PUBLISH tick:<SYMBOL> "BID,ASK"
+	c.redisPub.PublishGroupPrices(
+		tick.Symbol,
+		keys.HSet,
+		keys.Pub, // "tick:<SYMBOL>"
+		rawBid,
+		rawAsk,
+		fatPayload,
+	)
+
+	// 4. Publish MessagePack fat payload to the UI/WebSocket channel.
+	//    This is for the notification-service / frontend terminal.
+	//    Channel: "fat_tick:<SYMBOL>"
+	fatChannel := "fat_tick:" + tick.Symbol
+	c.redisPub.PublishFatPayload(tick.Symbol, keys.HSet, fatChannel, fatPayload)
 }
+
 
 func (c *Calculator) updateAndGetStats(symbol string, group string, bid, ask float64) []float64 {
 	now := time.Now().UTC()

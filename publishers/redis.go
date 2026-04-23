@@ -6,14 +6,13 @@ import (
 	"log"
 	"net"
 	"strings"
-
-	"fmt"
 	"time"
 
 	"github.com/vmihailenco/msgpack/v5"
 	"github.com/redis/go-redis/v9"
 	"pricing-service/config"
 )
+
 
 type RedisPublisher struct {
 	client *redis.ClusterClient
