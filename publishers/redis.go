@@ -2,6 +2,7 @@ package publishers
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"strings"
@@ -14,13 +15,46 @@ import (
 type RedisPublisher struct {
 	client *redis.ClusterClient
 	ctx    context.Context
-	script *redis.Script
+
+	// Lua script for the fat payload (UI layer):
+	// Stores the MessagePack blob in HSET field 'latest' and publishes to fat_tick:<SYMBOL>
+	fatScript *redis.Script
+
+	// Lua script for per-group fast-string prices (Go backend):
+	// Iterates ARGV pairs [field, value, field, value, ...] into HSET,
+	// then publishes the raw "BID,ASK" tick string to tick:<SYMBOL>
+	groupScript *redis.Script
 }
 
-// The Lua script for atomic state update and broadcasting
-const luaScript = `
+// luaFatScript stores the full MessagePack blob for the UI layer.
+// KEYS[1] = HSET key (e.g. "current_price:EURUSD")
+// ARGV[1] = MessagePack binary blob
+// ARGV[2] = pub channel (e.g. "fat_tick:EURUSD")
+const luaFatScript = `
 redis.call('HSET', KEYS[1], 'latest', ARGV[1])
 redis.call('PUBLISH', ARGV[2], ARGV[1])
+return 1
+`
+
+// luaGroupScript writes one HSET field per group ("BID,ASK" string) and
+// publishes the raw tick ("BID,ASK") to the tick channel consumed by the Go services.
+// KEYS[1] = HSET key (e.g. "current_price:EURUSD")
+// ARGV[1] = tick pub channel (e.g. "tick:EURUSD")
+// ARGV[2] = raw "BID,ASK" string for the tick channel (uses "Raw" group prices)
+// ARGV[3..N] = alternating field/value pairs: groupName, "BID,ASK", groupName, "BID,ASK", ...
+const luaGroupScript = `
+local tick_channel = ARGV[1]
+local tick_payload = ARGV[2]
+
+-- Write each group's "BID,ASK" as a separate hash field
+local i = 3
+while i <= #ARGV do
+    redis.call('HSET', KEYS[1], ARGV[i], ARGV[i+1])
+    i = i + 2
+end
+
+-- Publish the raw "BID,ASK" to the tick channel for risk-service
+redis.call('PUBLISH', tick_channel, tick_payload)
 return 1
 `
 
@@ -36,10 +70,9 @@ func NewRedisPublisher(cfg *config.Config) *RedisPublisher {
 	// Build Address Map for pod_ip -> external NodePort
 	remap := buildAddressMap(nodes, cfg.RedisPassword)
 
-	// Simple options - rely on user passing the correct nodes pointing to the cluster
 	// Intercept the dialer to route internal IPs to external NodePorts
 	options := &redis.ClusterOptions{
-		Addrs: nodes,
+		Addrs:    nodes,
 		Password: cfg.RedisPassword,
 		Dialer: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			origAddr := addr
@@ -73,22 +106,64 @@ func NewRedisPublisher(cfg *config.Config) *RedisPublisher {
 	}
 
 	return &RedisPublisher{
-		client: client,
-		ctx:    ctx,
-		script: redis.NewScript(luaScript),
+		client:      client,
+		ctx:         ctx,
+		fatScript:   redis.NewScript(luaFatScript),
+		groupScript: redis.NewScript(luaGroupScript),
 	}
 }
 
-func (r *RedisPublisher) PublishFatPayload(symbol string, keyHset string, keyPub string, payload interface{}) {
+// PublishGroupPrices writes per-group fast-string prices into the Redis Hash and
+// publishes a raw "BID,ASK" tick to the tick channel.
+//
+// This is the format consumed by:
+//   - execution-service: HGET current_price:<SYMBOL> <GROUP_NAME> → "BID,ASK"
+//   - risk-service:      SUBSCRIBE tick:<SYMBOL>                  → "BID,ASK"
+//
+// groupPrices: map of GroupName → [bid, ask]
+// rawBid, rawAsk: the unspread market price used for the tick channel publish
+func (r *RedisPublisher) PublishGroupPrices(
+	symbol string,
+	keyHset string,
+	tickChannel string,
+	rawBid float64,
+	rawAsk float64,
+	groupPrices map[string][]float64,
+) {
+	// Build ARGV: [tickChannel, "rawBid,rawAsk", group1, "bid,ask", group2, "bid,ask", ...]
+	rawTick := fmt.Sprintf("%.5f,%.5f", rawBid, rawAsk)
+	argv := []interface{}{tickChannel, rawTick}
+
+	for groupName, prices := range groupPrices {
+		if len(prices) != 2 {
+			continue
+		}
+		argv = append(argv, groupName, fmt.Sprintf("%.5f,%.5f", prices[0], prices[1]))
+	}
+
+	err := r.groupScript.Run(r.ctx, r.client, []string{keyHset}, argv...).Err()
+	if err != nil {
+		log.Printf("Redis group prices Lua error for %s: %v", symbol, err)
+	}
+}
+
+// PublishFatPayload encodes the full group price map as a MessagePack binary blob
+// and publishes it to the fat_tick channel for the UI/WebSocket layer (notification-service).
+//
+// This does NOT affect the format read by the Go backend services.
+// Channel: fat_tick:<SYMBOL>
+// Field in Hash: "latest" (for any subscribers that HGET the last snapshot)
+func (r *RedisPublisher) PublishFatPayload(symbol string, keyHset string, fatChannel string, payload interface{}) {
 	data, err := msgpack.Marshal(payload)
 	if err != nil {
+		log.Printf("msgpack marshal error for %s: %v", symbol, err)
 		return
 	}
 
-	// Fire and forget, run lua script with binary data string (Go treats string/[]byte transparently in redis script args)
-	err = r.script.Run(r.ctx, r.client, []string{keyHset}, data, keyPub).Err()
+	// Fire and forget — binary blob into 'latest' field + fat_tick pub
+	err = r.fatScript.Run(r.ctx, r.client, []string{keyHset}, data, fatChannel).Err()
 	if err != nil {
-		log.Printf("Redis Lua execution error for %s: %v", symbol, err)
+		log.Printf("Redis fat payload Lua error for %s: %v", symbol, err)
 	}
 }
 
