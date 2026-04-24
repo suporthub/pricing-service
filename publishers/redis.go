@@ -20,7 +20,7 @@ type RedisPublisher struct {
 
 	// Lua script for the fat payload (UI layer):
 	// Stores the MessagePack blob in HSET field 'latest' and publishes to fat_tick:<SYMBOL>
-	fatScript *redis.Script
+	// fatScript *redis.Script
 
 	// Lua script for per-group fast-string prices (Go backend):
 	// Iterates ARGV pairs [field, value, field, value, ...] into HSET,
@@ -32,11 +32,13 @@ type RedisPublisher struct {
 // KEYS[1] = HSET key (e.g. "current_price:EURUSD")
 // ARGV[1] = MessagePack binary blob
 // ARGV[2] = pub channel (e.g. "fat_tick:EURUSD")
+/*
 const luaFatScript = `
 redis.call('HSET', KEYS[1], 'latest', ARGV[1])
 redis.call('PUBLISH', ARGV[2], ARGV[1])
 return 1
 `
+*/
 
 // luaGroupScript writes one HSET field per group ("BID,ASK" string) and
 // publishes the full multi-group tick string to the tick channel consumed by Go services.
@@ -114,7 +116,7 @@ func NewRedisPublisher(cfg *config.Config) *RedisPublisher {
 	return &RedisPublisher{
 		client:      client,
 		ctx:         ctx,
-		fatScript:   redis.NewScript(luaFatScript),
+		// fatScript:   redis.NewScript(luaFatScript),
 		groupScript: redis.NewScript(luaGroupScript),
 	}
 }
@@ -146,10 +148,11 @@ func (r *RedisPublisher) PublishGroupPrices(
 
 	first := true
 	for groupName, prices := range groupPrices {
-		if len(prices) < 2 {
+		if len(prices) < 5 {
 			continue
 		}
-		pairStr := fmt.Sprintf("%.5f,%.5f", prices[0], prices[1])
+		// Format: "BID,ASK,HIGH,LOW,PCT"
+		pairStr := fmt.Sprintf("%.5f,%.5f,%.5f,%.5f,%.2f", prices[0], prices[1], prices[2], prices[3], prices[4])
 
 		// Append to multi-group tick string
 		if !first {
@@ -175,10 +178,7 @@ func (r *RedisPublisher) PublishGroupPrices(
 
 // PublishFatPayload encodes the full group price map as a MessagePack binary blob
 // and publishes it to the fat_tick channel for the UI/WebSocket layer (notification-service).
-//
-// This does NOT affect the format read by the Go backend services.
-// Channel: fat_tick:<SYMBOL>
-// Field in Hash: "latest" (for any subscribers that HGET the last snapshot)
+/*
 func (r *RedisPublisher) PublishFatPayload(symbol string, keyHset string, fatChannel string, payload interface{}) {
 	data, err := msgpack.Marshal(payload)
 	if err != nil {
@@ -192,6 +192,7 @@ func (r *RedisPublisher) PublishFatPayload(symbol string, keyHset string, fatCha
 		log.Printf("Redis fat payload Lua error for %s: %v", symbol, err)
 	}
 }
+*/
 
 func (r *RedisPublisher) SaveStats(symbol string, group string, open, high, low float64, date string) {
 	key := "price_stats:" + symbol

@@ -101,8 +101,8 @@ func (c *Calculator) processTick(tick RawTick) {
 	// 4. Publish MessagePack fat payload to the UI/WebSocket channel.
 	//    This is for the notification-service / frontend terminal.
 	//    Channel: "fat_tick:<SYMBOL>"
-	fatChannel := "fat_tick:" + tick.Symbol
-	c.redisPub.PublishFatPayload(tick.Symbol, keys.HSet, fatChannel, fatPayload)
+	// fatChannel := "fat_tick:" + tick.Symbol
+	// c.redisPub.PublishFatPayload(tick.Symbol, keys.HSet, fatChannel, fatPayload)
 }
 
 
